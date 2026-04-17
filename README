@@ -1,0 +1,30 @@
+roloman – binary (de)serialization lib for C data types
+
+DISCLAIMER:
+THIS IS A HOBBY PROJECT AND THUS NOT INTENDED FOR PRODUCTION USE.
+IT IS INTENTIONALLY NOT THREAD SAFE.
+
+- (de)serialize aka. (un)roll C data types into binary buffers
+- rolled buffers can be transmitted over the wire or stored on disk for later retrieval
+- possibly with compression
+
+Message Layout:
+86B	HEAD
+<=2^32B	Body
+
+Binary Format (byte-length, purpose):
+04B	Magic Name "ROLO"
+02B	SemVer Major
+02B	SemVer Minor
+02B	SemVer Patch
+68B	SHA256 Schema File Hash
+04B	Compression Indicator (default 0 for none)
+04B	Message Length in bytes (compressed if Compression Indicator is set)
+[ Body ]
+
+Body		:= Sequence of Entity
+Entity		:= EntityHead .. EntityBody
+EntityHead	:= ByteLength(4B) .. TypeIndicator
+TypeIndicator 	:= ContainerType(4B) .. ElementType(4B)
+EntityBody	:= Binary(ByteLength)
+
