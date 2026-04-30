@@ -9,7 +9,7 @@ IT IS INTENTIONALLY NOT THREAD SAFE.
 - possibly with compression
 
 Message Layout:
-86B	HEAD
+88B	HEAD
 <=2^32B	Body
 
 Binary Format (byte-length, purpose):
@@ -17,6 +17,7 @@ Binary Format (byte-length, purpose):
 02B	SemVer Major
 02B	SemVer Minor
 02B	SemVer Patch
+02B	Alignment Padding
 68B	SHA256 Schema File Hash
 04B	Compression Indicator (default 0 for none)
 04B	Message Length in bytes (compressed if Compression Indicator is set)

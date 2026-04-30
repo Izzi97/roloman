@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <fcntl.h>
 
 #define ROLO_MAJOR 0
 #define ROLO_MINOR 0
@@ -11,6 +12,7 @@
 typedef struct {
 	uint8_t 	magic[4];
 	uint16_t 	version[3];
+	uint16_t	alignment_padding; // for uint32 alignment
 	uint8_t		schema_hash[68];
 	uint32_t	compression;
 	uint32_t	body_size;
@@ -23,6 +25,7 @@ typedef struct {
 } rolo_reader_t;
 
 typedef struct {
+	rolo_head_t head;
 	void *buffer;
 	size_t limit;
 	size_t count;
@@ -51,76 +54,28 @@ typedef enum {
 #define ROLO_NEXT_ELEMENT_TYPE ROLO_STRING + 1
 
 typedef struct {
-	uint32_t 	length;
-	uint32_t 	container_type;
-	uint32_t 	element_type;
-	void*		data;
+	uint32_t length;
+	uint32_t container_type;
+	uint32_t element_type;
+} rolo_entity_meta_t;
+
+typedef struct {
+	rolo_entity_meta_t 	meta;
+	void*			data;
 } rolo_entity_t;
 
 bool rolo_init_read(rolo_reader_t *reader, int fd);
 bool rolo_read(rolo_reader_t *reader, void *dest, size_t count);
+#define rolo_head_read(reader, dest) rolo_read(reader, dest, sizeof(rolo_head_t))
+bool rolo_entity_read(rolo_reader_t *reader, rolo_entity_t *dest);
 bool rolo_read_complete(rolo_reader_t *reader);
 
 bool rolo_init_write(rolo_writer_t *rolo, int fd);
 bool rolo_write(rolo_writer_t *writer, void *src, size_t count);
+bool rolo_entity_write(rolo_writer_t *writer, rolo_entity_t *src);
 bool rolo_flush(rolo_writer_t *writer);
 
-#define rolo_head_read(reader, dest) rolo_read(reader, dest, sizeof(rolo_head_t))
-#define rolo_head_write(writer, src) rolo_write(writer, src, sizeof(rolo_head_t))
-bool rolo_entity_read(rolo_reader_t *reader, rolo_entity_t *dest);
-bool rolo_entity_write(rolo_writer_t *writer, rolo_entity_t *src);
 
-bool rolo_read(rolo_reader_t *reader, void *dest, size_t count) {
-	if (!reader || !dest) return false;
-
-	ssize_t ret;
-	do {
-		ret = read(reader->fd, dest, count);
-		if (ret < 0) return false;
-
-		dest += ret;
-		count -= ret;
-	} while(ret > 0);
-
-	return true;
-}
-
-bool rolo_read_complete(rolo_reader_t *reader) {
-	return reader->count >= reader->limit;
-}
-
-bool rolo_write(rolo_writer_t *writer, void *src, size_t count) {
-	if (!writer || !src) return false;
-
-	size_t free = writer->limit - writer->count;
-	if (free < count) {
-		writer->limit *= 2;
-		writer->buffer = realloc(writer->buffer, writer->limit);
-		if (!writer->buffer) return false;
-	}
-	memcpy(writer->buffer + writer->count, src, count);
-	writer->count += count;
-
-	return true;
-}
-
-// TODO: test this
-bool rolo_flush(rolo_writer_t *writer) {
-	if (!writer || !writer->buffer) return false;
-
-	ssize_t ret;
-	size_t written = 0;
-	size_t count = writer->count;
-	do {
-		ret = write(writer->fd, writer->buffer + written, count);
-		if (ret < 0) return false;
-		
-		written += ret;
-		count -= ret;
-	} while (ret > 0);
-
-	return true;
-}
 
 bool rolo_init_read(rolo_reader_t *reader, int fd) {
 	rolo_head_t *head = NULL;
@@ -147,12 +102,50 @@ bool rolo_init_read(rolo_reader_t *reader, int fd) {
 	// ignore schema hash for now...
 	// ignore compression for now...
 	
-	reader->limit = head->body_size;
+	reader->limit = sizeof(rolo_head_t) + head->body_size;
 	return true;
 fail:
 	free(head);
 	return false;
 }
+
+bool rolo_read(rolo_reader_t *reader, void *dest, size_t size) {
+	if (!reader || !dest) return false;
+
+	ssize_t ret;
+	do {
+		ret = read(reader->fd, dest, size);
+		if (ret < 0) return false;
+
+		dest += ret;
+		reader->count += ret;
+		size -= ret;
+	} while(ret > 0);
+
+	if (size != 0) return false;
+	return true;
+}
+
+bool rolo_entity_read(rolo_reader_t *reader, rolo_entity_t *dest) {
+	if (!reader || !dest) return false;
+
+	rolo_entity_meta_t meta = {0};
+	if (!rolo_read(reader, &meta, sizeof(meta))) return false;
+	
+	void *data = malloc(sizeof(meta.length));
+	if (!data) return false;
+	if (!rolo_read(reader, data, meta.length)) return false;
+
+	dest->meta = meta;
+	dest->data = data;
+	return true;
+}
+
+bool rolo_read_complete(rolo_reader_t *reader) {
+	return reader->count >= reader->limit;
+}
+
+
 
 bool rolo_init_write(rolo_writer_t *writer, int fd) {
 	if (!writer) return false;
@@ -163,14 +156,67 @@ bool rolo_init_write(rolo_writer_t *writer, int fd) {
 	writer->buffer = malloc(writer->limit);
 	if (!writer->buffer) return false;
 
-	rolo_head_t head = (rolo_head_t){
+	writer->head = (rolo_head_t){
 		.magic = "ROLO",
                 .version = { ROLO_MAJOR, ROLO_MINOR, ROLO_PATCH },
+		.alignment_padding = 0,
                 .schema_hash = {0}, // ignore this for now ...
                 .compression = 0, // ignore this for now ...
                 .body_size = 0
 	};
-	rolo_head_write(writer, &head);
+	return true;
+}
+
+bool rolo_write(rolo_writer_t *writer, void *src, size_t count) {
+	if (!writer || !src) return false;
+
+	size_t free = writer->limit - writer->count;
+	if (free < count) {
+		writer->limit *= 2;
+		writer->buffer = realloc(writer->buffer, writer->limit);
+		if (!writer->buffer) return false;
+	}
+	memcpy(writer->buffer + writer->count, src, count);
+	writer->count += count;
+
+	return true;
+}
+
+bool rolo_entity_write(rolo_writer_t *writer, rolo_entity_t *src) {
+	if (!writer || !src) return false;
+
+	if (!rolo_write(writer, (void*)&(src->meta), sizeof(rolo_entity_meta_t))) return false;
+	if (!rolo_write(writer, src->data, src->meta.length)) return false;
+	writer->head.body_size += sizeof(rolo_entity_meta_t) + src->meta.length;
+	return true;
+}
+
+bool rolo_flush(rolo_writer_t *writer) {
+	if (!writer || !writer->buffer) return false;
+
+	// flush head
+	ssize_t ret;
+	size_t written = 0;
+	size_t count = sizeof(rolo_head_t);
+	do {
+		ret = write(writer->fd, &(writer->head) + written, count);
+		if (ret < 0) return false;
+		
+		written += ret;
+		count -= ret;
+	} while (count > 0);
+
+	// flush body
+	written = 0;
+	count = writer->count;
+	do {
+		ret = write(writer->fd, writer->buffer + written, count);
+		if (ret < 0) return false;
+
+		written += ret;
+		count -= ret;
+	} while (count > 0);
+
 	return true;
 }
 
