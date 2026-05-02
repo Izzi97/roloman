@@ -5,15 +5,18 @@
 #include <string.h>
 #include <fcntl.h>
 
+#include "rolo_schema_hash.h"
+
 #define ROLO_MAJOR 0
 #define ROLO_MINOR 0
 #define ROLO_PATCH 0
+#define ROLO_NO_COMPRESSION 0
 
 typedef struct {
 	uint8_t 	magic[4];
 	uint16_t 	version[3];
 	uint16_t	alignment_padding; // for uint32 alignment
-	uint8_t		schema_hash[68];
+	uint8_t		schema_hash[16];
 	uint32_t	compression;
 	uint32_t	body_size;
 } rolo_head_t;
@@ -33,11 +36,6 @@ typedef struct {
 } rolo_writer_t;
 
 typedef enum {
-	ROLO_NO_CONTAINER,
-	ROLO_ARRAY
-} rolo_container_type_t;
-
-typedef enum {
 	ROLO_UINT8,
 	ROLO_UINT16,
 	ROLO_UINT32,
@@ -55,7 +53,6 @@ typedef enum {
 
 typedef struct {
 	uint32_t length;
-	uint32_t container_type;
 	uint32_t element_type;
 } rolo_entity_meta_t;
 
@@ -74,6 +71,20 @@ bool rolo_init_write(rolo_writer_t *rolo, int fd);
 bool rolo_write(rolo_writer_t *writer, void *src, size_t count);
 bool rolo_entity_write(rolo_writer_t *writer, rolo_entity_t *src);
 bool rolo_flush(rolo_writer_t *writer);
+
+#define rolo_register(type, tag) \
+	bool write_##type(rolo_writer_t *w, type t) { \
+		if (!w) return false; \
+		rolo_entity_t e = (rolo_entity_t){ \
+			.meta = (rolo_entity_meta_t){ \
+				.length = sizeof(type), \
+				.element_type = tag \
+			}, \
+			.data = (void*)&t \
+		}; \
+		return rolo_entity_write(w, &e); \
+	}
+
 
 
 
@@ -99,8 +110,12 @@ bool rolo_init_read(rolo_reader_t *reader, int fd) {
 	if (!(version[0] == ROLO_MAJOR && version[1] == ROLO_MINOR && version[2] == ROLO_PATCH))
 		goto fail;
 
-	// ignore schema hash for now...
-	// ignore compression for now...
+	for (size_t i = 0; i < 16; i++) {
+		if (head->schema_hash[i] != ROLO_SCHEMA_HASH[i]) goto fail;
+	}
+
+	// no compression support for now...
+	if (head->compression != ROLO_NO_COMPRESSION) goto fail;
 	
 	reader->limit = sizeof(rolo_head_t) + head->body_size;
 	return true;
@@ -160,10 +175,12 @@ bool rolo_init_write(rolo_writer_t *writer, int fd) {
 		.magic = "ROLO",
                 .version = { ROLO_MAJOR, ROLO_MINOR, ROLO_PATCH },
 		.alignment_padding = 0,
-                .schema_hash = {0}, // ignore this for now ...
                 .compression = 0, // ignore this for now ...
                 .body_size = 0
 	};
+	for (size_t i = 0; i < 16; i++)
+		writer->head.schema_hash[i] = ROLO_SCHEMA_HASH[i];
+
 	return true;
 }
 
